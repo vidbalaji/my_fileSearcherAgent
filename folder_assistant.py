@@ -68,7 +68,21 @@ How to work:
 - Answer briefly, then list the references you used as `path:line` with one line on why each matters.
 - Only state what the files show. If you could not find it, say so and say where you looked.
 - If the question is too vague to search, ask one short clarifying question instead.
-- You are read-only. Never suggest that you changed a file."""
+- You are read-only. Never suggest that you changed a file.
+- Folders may contain readsummary.md files (AI-written overviews). Use them only as a map to decide where to look:
+  read the relevant one with read_file, then confirm in the real files. Never cite readsummary.md as evidence."""
+
+MAP_CHARS = 4000
+
+
+def system_prompt(root: Path) -> str:
+    """System prompt for ask, with the root readsummary.md (if any) included as a starting map."""
+    prompt = SYSTEM_PROMPT.format(root=root)
+    summary = root / SUMMARY_FILE
+    if summary.is_file():
+        text = summary.read_text(encoding="utf-8", errors="replace")[:MAP_CHARS]
+        prompt += f"\n\nFolder map (from {SUMMARY_FILE}, may be out of date; use it to choose where to search):\n{text}"
+    return prompt
 
 TOOLS = [
     {
@@ -197,6 +211,8 @@ class FolderTools:
             return f"Invalid regex: {e}"
         hits = []
         for p in self._walk_files(self.root):
+            if p.name == SUMMARY_FILE:
+                continue
             if file_glob and not fnmatch.fnmatch(p.name.lower(), file_glob.lower()):
                 continue
             if not self._is_text(p):
@@ -487,7 +503,7 @@ def main():
         return
 
     tools = FolderTools(args.folder)
-    messages = [{"role": "system", "content": SYSTEM_PROMPT.format(root=tools.root)}]
+    messages = [{"role": "system", "content": system_prompt(tools.root)}]
 
     def on_step(step: str) -> None:
         print(f"  > {step}", file=sys.stderr)
