@@ -17,6 +17,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 try:
     from dotenv import load_dotenv
@@ -27,6 +28,12 @@ except ImportError:
     pass
 
 MODEL = os.getenv("MODEL", "openai/gpt-4.1")
+Progress = Callable[[str], None]
+
+
+def print_progress(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+
 MAX_TOOL_ROUNDS = 15
 MAX_SEARCH_HITS = 60
 MAX_READ_LINES = 300
@@ -227,7 +234,7 @@ class FolderTools:
             return f"Error: {e}"
 
 
-def ask(question: str, messages: list, tools: FolderTools, verbose: bool) -> str:
+def ask(question: str, messages: list, tools: FolderTools, on_step: Progress | None = None) -> str:
     messages.append({"role": "user", "content": question})
     for _ in range(MAX_TOOL_ROUNDS):
         response = call_model(messages=messages, tools=TOOLS)
@@ -239,8 +246,8 @@ def ask(question: str, messages: list, tools: FolderTools, verbose: bool) -> str
 
         for call in message.tool_calls:
             arguments = json.loads(call.function.arguments or "{}")
-            if verbose:
-                print(f"  > {call.function.name} {arguments}", file=sys.stderr)
+            if on_step:
+                on_step(f"{call.function.name} {arguments}")
             result = tools.call(call.function.name, arguments)
             messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
 
@@ -291,18 +298,52 @@ def human_size(num: float) -> str:
     return f"{num:.1f} TB"
 
 
-def cleanup_report(root: Path, days: int, max_depth: int, show_all: bool = False) -> str:
+def scan_tree(root: Path, max_depth: int, progress: Progress) -> dict[Path, list]:
+    """Walk once and total [newest mtime, bytes, files] for every folder up to max_depth below root."""
+    stats: dict[Path, list] = {}
+    scanned = 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d != ".git" and not (Path(dirpath) / d).is_symlink()]
+        parts = Path(dirpath).relative_to(root).parts
+        ancestors = [root.joinpath(*parts[:k]) for k in range(1, min(len(parts), max_depth) + 1)]
+        if 0 < len(parts) <= max_depth:
+            stats.setdefault(root.joinpath(*parts), [0.0, 0, 0])
+        for name in filenames:
+            if name == SUMMARY_FILE:
+                continue
+            try:
+                st = (Path(dirpath) / name).stat()
+            except OSError:
+                continue
+            for folder in ancestors:
+                entry = stats.setdefault(folder, [0.0, 0, 0])
+                entry[0] = max(entry[0], st.st_mtime)
+                entry[1] += st.st_size
+                entry[2] += 1
+            scanned += 1
+            if scanned % 2000 == 0:
+                progress(f"Scanning... {scanned:,} files so far ({Path(dirpath).relative_to(root).as_posix()})")
+    progress(f"Scan done: {scanned:,} files in {len(stats):,} folders.")
+    return stats
+
+
+def cleanup_report(root: Path, days: int, max_depth: int, show_all: bool = False,
+                   progress: Progress = print_progress) -> str:
     now = datetime.now().timestamp()
     rows = []
     total_bytes = 0
+    stats = scan_tree(root, max_depth, progress)
+    checked = 0
 
     def visit(folder: Path, depth: int):
-        nonlocal total_bytes
+        nonlocal total_bytes, checked
         for child in sorted(p for p in folder.iterdir() if p.is_dir() and not p.is_symlink()):
             if child.name == ".git":
                 continue
-            file_mtime, size, count = folder_stats(child)
-            newest, source = last_changed(child, file_mtime)
+            file_mtime, size, count = stats.get(child, [0.0, 0, 0])
+            checked += 1
+            progress(f"Checking dates {checked}: {child.relative_to(root).as_posix()}")
+            newest, source = last_changed(child, file_mtime or child.stat().st_mtime)
             age_days = int((now - newest) // 86400)
             reasons = []
             if child.name in REGENERABLE_DIRS:
@@ -320,6 +361,7 @@ def cleanup_report(root: Path, days: int, max_depth: int, show_all: bool = False
                 visit(child, depth + 1)
 
     visit(root, 1)
+    progress(f"Report done: checked {checked} folders.")
     if not rows:
         return (f"No folders older than {days} days, empty, or regenerable found under {root} "
                 f"(checked {max_depth} levels). Try --all to see every folder's age.")
@@ -374,11 +416,14 @@ def summary_material(folder: Path, tools: FolderTools) -> str:
     return "\n\n".join(parts)[:SUMMARY_INPUT_CHARS]
 
 
-def summarize_folders(root: Path, max_depth: int) -> None:
+def summarize_folders(root: Path, max_depth: int, progress: Progress = print_progress) -> list[Path]:
     tools = FolderTools(root)
     folders = folders_to_summarize(tools.root, max_depth)
-    print(f"Writing {SUMMARY_FILE} in {len(folders)} folders (deepest first)...")
-    for folder in folders:
+    progress(f"Writing {SUMMARY_FILE} in {len(folders)} folders (deepest first)...")
+    written = []
+    for i, folder in enumerate(folders, 1):
+        label = folder.relative_to(tools.root.parent).as_posix()
+        progress(f"({i}/{len(folders)}) summarizing {label}")
         newest, _, _ = folder_stats(folder)
         prompt = SUMMARY_PROMPT.format(
             name=folder.name or str(folder),
@@ -387,7 +432,22 @@ def summarize_folders(root: Path, max_depth: int) -> None:
         )
         response = call_model(messages=[{"role": "user", "content": prompt}])
         (folder / SUMMARY_FILE).write_text(response.choices[0].message.content or "", encoding="utf-8")
-        print(f"  wrote {(folder / SUMMARY_FILE).relative_to(tools.root.parent)}")
+        written.append(folder / SUMMARY_FILE)
+    progress(f"Summaries done: wrote {len(written)} files.")
+    return written
+
+
+def summarize_file(path: Path) -> str:
+    """Summarize one text file and return the summary (nothing is written)."""
+    tools = FolderTools(path.parent)
+    if not tools._is_text(path):
+        return f"{path.name} is not a readable text file."
+    text = path.read_text(encoding="utf-8", errors="replace")[:SUMMARY_INPUT_CHARS]
+    prompt = (f"Summarize this file for someone opening it for the first time: what it is for, "
+              f"its main parts, and anything notable. Use short Markdown. Only describe what is shown.\n\n"
+              f"File: {path.name}\n\n{text}")
+    response = call_model(messages=[{"role": "user", "content": prompt}])
+    return response.choices[0].message.content or ""
 
 
 def main():
@@ -422,14 +482,18 @@ def main():
         return
 
     if args.command == "summarize":
-        summarize_folders(args.folder, args.depth)
+        for path in summarize_folders(args.folder, args.depth):
+            print(f"  wrote {path}")
         return
 
     tools = FolderTools(args.folder)
     messages = [{"role": "system", "content": SYSTEM_PROMPT.format(root=tools.root)}]
 
+    def on_step(step: str) -> None:
+        print(f"  > {step}", file=sys.stderr)
+
     if args.question:
-        print(ask(args.question, messages, tools, args.verbose))
+        print(ask(args.question, messages, tools, on_step if args.verbose else None))
         return
 
     print(f"Folder: {tools.root}\nAsk a question (empty line or Ctrl+C to quit).")
@@ -440,7 +504,7 @@ def main():
             break
         if not question:
             break
-        print("\n" + ask(question, messages, tools, args.verbose))
+        print("\n" + ask(question, messages, tools, on_step if args.verbose else None))
 
 
 if __name__ == "__main__":

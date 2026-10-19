@@ -34,6 +34,18 @@ python folder_assistant.py report ./project --all        # every folder's age, n
 python folder_assistant.py summarize ./project --depth 2
 ```
 
+## Sticky-note window
+
+```bash
+python sticky.py
+```
+
+A small always-on-top window: paste a folder or file path (quotes from Windows "Copy as path" are fine),
+then click **Report**, **Ask** (type a question first; follow-ups keep the conversation) or **Summarize**.
+For a single file, Ask focuses on that file and Summarize shows a summary without writing anything.
+For a folder, Summarize asks before writing `readsummary.md` files. Progress shows under the buttons.
+Uses Python's built-in tkinter (included with the python.org Windows installer).
+
 ## Notes
 
 - Only text files are read (code, JSON, XML, Markdown, config). PDF, Word and Excel are skipped.
