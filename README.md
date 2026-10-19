@@ -47,6 +47,15 @@ the latest answer. For a single file, questions focus on that file and Summarize
 For a folder, Summarize asks before writing `readsummary.md` files. Progress shows above the input box.
 Uses Python's built-in tkinter (included with the python.org Windows installer).
 
+**Desktop shortcut (Windows):** run once from this folder
+
+```powershell
+powershell -ExecutionPolicy Bypass -File make_shortcut.ps1
+```
+
+It creates **Folder Assistant** on your desktop, which opens the window with this folder's `.venv`
+(no console window). If it doesn't open, run `python sticky.py` in a terminal to see the error.
+
 ## How `ask` uses readsummary.md
 
 If the folder has a `readsummary.md` (from `summarize`), it is given to the model as a map so it knows where
