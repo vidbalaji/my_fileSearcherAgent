@@ -13,11 +13,10 @@ import fnmatch
 import json
 import os
 import re
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-
-import litellm
 
 MODEL = os.getenv("MODEL", "openai/gpt-4.1")
 MAX_TOOL_ROUNDS = 15
@@ -195,6 +194,8 @@ class FolderTools:
 
 
 def ask(question: str, messages: list, tools: FolderTools, verbose: bool) -> str:
+    import litellm
+
     messages.append({"role": "user", "content": question})
     for _ in range(MAX_TOOL_ROUNDS):
         response = litellm.completion(model=MODEL, messages=messages, tools=TOOLS)
@@ -215,9 +216,10 @@ def ask(question: str, messages: list, tools: FolderTools, verbose: bool) -> str
 
 
 def folder_stats(folder: Path) -> tuple[float, int, int]:
-    """Return (newest modification time, total bytes, file count) for everything under the folder."""
+    """Return (newest file modification time, total bytes, file count) for everything under the folder."""
     newest, size, count = 0.0, 0, 0
-    for dirpath, _, filenames in os.walk(folder):
+    for dirpath, dirnames, filenames in os.walk(folder):
+        dirnames[:] = [d for d in dirnames if d != ".git"]
         for name in filenames:
             if name == SUMMARY_FILE:
                 continue
@@ -231,6 +233,24 @@ def folder_stats(folder: Path) -> tuple[float, int, int]:
     return newest or folder.stat().st_mtime, size, count
 
 
+def git(folder: Path, *args: str) -> str | None:
+    try:
+        result = subprocess.run(["git", "-C", str(folder), *args], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def last_changed(folder: Path, file_mtime: float) -> tuple[float, str]:
+    """Use the last git commit for folders inside a repo, since clone/pull resets file dates."""
+    commit_time = git(folder, "log", "-1", "--format=%ct", "--", ".")
+    if not commit_time:
+        return file_mtime, "file dates"
+    if git(folder, "status", "--porcelain", "--", "."):
+        return file_mtime, "uncommitted changes"
+    return float(commit_time), "last commit"
+
+
 def human_size(num: float) -> str:
     for unit in ("B", "KB", "MB", "GB"):
         if num < 1024:
@@ -239,7 +259,7 @@ def human_size(num: float) -> str:
     return f"{num:.1f} TB"
 
 
-def cleanup_report(root: Path, days: int, max_depth: int) -> str:
+def cleanup_report(root: Path, days: int, max_depth: int, show_all: bool = False) -> str:
     now = datetime.now().timestamp()
     rows = []
     total_bytes = 0
@@ -249,7 +269,8 @@ def cleanup_report(root: Path, days: int, max_depth: int) -> str:
         for child in sorted(p for p in folder.iterdir() if p.is_dir() and not p.is_symlink()):
             if child.name == ".git":
                 continue
-            newest, size, count = folder_stats(child)
+            file_mtime, size, count = folder_stats(child)
+            newest, source = last_changed(child, file_mtime)
             age_days = int((now - newest) // 86400)
             reasons = []
             if child.name in REGENERABLE_DIRS:
@@ -259,25 +280,28 @@ def cleanup_report(root: Path, days: int, max_depth: int) -> str:
             elif age_days >= days:
                 reasons.append(f"not changed in {age_days} days")
             if reasons:
-                rows.append((child.relative_to(root).as_posix(), newest, age_days, size, count, "; ".join(reasons)))
                 total_bytes += size
-            elif depth < max_depth:
+            if reasons or show_all:
+                why = "; ".join(reasons) or "-"
+                rows.append((child.relative_to(root).as_posix(), newest, age_days, size, count, source, why))
+            if not reasons and depth < max_depth:
                 visit(child, depth + 1)
 
     visit(root, 1)
     if not rows:
-        return f"No folders older than {days} days, empty, or regenerable found under {root}."
+        return (f"No folders older than {days} days, empty, or regenerable found under {root} "
+                f"(checked {max_depth} levels). Try --all to see every folder's age.")
 
     lines = [
-        f"# Cleanup candidates under {root}",
+        f"# Folders under {root}" if show_all else f"# Cleanup candidates under {root}",
         f"Review before deleting. Nothing has been deleted. Potential space: {human_size(total_bytes)}",
         "",
-        "| Folder | Last changed | Age (days) | Size | Files | Why |",
-        "|---|---|---|---|---|---|",
+        "| Folder | Last changed | Age (days) | Based on | Size | Files | Why |",
+        "|---|---|---|---|---|---|---|",
     ]
-    for path, newest, age, size, count, why in sorted(rows, key=lambda r: -r[3]):
+    for path, newest, age, size, count, source, why in sorted(rows, key=lambda r: (r[6] == "-", -r[3])):
         changed = datetime.fromtimestamp(newest).strftime("%Y-%m-%d")
-        lines.append(f"| {path} | {changed} | {age} | {human_size(size)} | {count} | {why} |")
+        lines.append(f"| {path} | {changed} | {age} | {source} | {human_size(size)} | {count} | {why} |")
     return "\n".join(lines)
 
 
@@ -319,6 +343,8 @@ def summary_material(folder: Path, tools: FolderTools) -> str:
 
 
 def summarize_folders(root: Path, max_depth: int) -> None:
+    import litellm
+
     tools = FolderTools(root)
     folders = folders_to_summarize(tools.root, max_depth)
     print(f"Writing {SUMMARY_FILE} in {len(folders)} folders (deepest first)...")
@@ -348,6 +374,7 @@ def main():
     report_cmd.add_argument("--days", type=int, default=365, help="Flag folders unchanged for this many days.")
     report_cmd.add_argument("--depth", type=int, default=3, help="How many folder levels to check.")
     report_cmd.add_argument("--out", type=Path, help="Also save the report to this Markdown file.")
+    report_cmd.add_argument("--all", action="store_true", help="List every checked folder, not just candidates.")
 
     summarize_cmd = commands.add_parser("summarize", help=f"Write {SUMMARY_FILE} in each folder.")
     summarize_cmd.add_argument("folder", type=Path)
@@ -358,7 +385,7 @@ def main():
         parser.error(f"Not a folder: {args.folder}")
 
     if args.command == "report":
-        report = cleanup_report(args.folder.resolve(), args.days, args.depth)
+        report = cleanup_report(args.folder.resolve(), args.days, args.depth, args.all)
         print(report)
         if args.out:
             args.out.write_text(report + "\n", encoding="utf-8")

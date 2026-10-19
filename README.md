@@ -22,6 +22,7 @@ export MODEL=openai/gpt-4.1      # optional, any LiteLLM model name
 python folder_assistant.py ask "D:/work/project"
 python folder_assistant.py ask ./project -q "where is the order quantity validated?" -v
 python folder_assistant.py report ./project --days 365 --out cleanup.md
+python folder_assistant.py report ./project --all        # every folder's age, not just candidates
 python folder_assistant.py summarize ./project --depth 2
 ```
 
@@ -29,5 +30,8 @@ python folder_assistant.py summarize ./project --depth 2
 
 - Only text files are read (code, JSON, XML, Markdown, config). PDF, Word and Excel are skipped.
 - `ask` searches by keyword, so it depends on the model picking good search terms.
-- Folder age is based on file modification time; copied or unzipped folders may look newer than they are.
+- Folder age inside a git repo uses the last commit that touched it, because clone/pull resets file dates.
+  Folders with uncommitted changes count as changed today. Outside git, file modification time is used,
+  so copied or unzipped folders may look newer than they are.
+- `report` needs no API key or `litellm`; only `ask` and `summarize` call the model.
 - `summarize` makes one model call per folder; start with a small `--depth`.
