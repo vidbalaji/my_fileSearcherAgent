@@ -12,7 +12,6 @@ A small, read-only assistant for a folder of files. It has three commands:
 
 ```bash
 pip install -r requirements.txt
-pip install python-dotenv        # optional: lets the script read a .env file
 ```
 
 Give it your API key, either in a `.env` file next to `folder_assistant.py` (copy `.env.example`):
@@ -43,4 +42,5 @@ python folder_assistant.py summarize ./project --depth 2
   Folders with uncommitted changes count as changed today. Outside git, file modification time is used,
   so copied or unzipped folders may look newer than they are.
 - `report` needs no API key or `litellm`; only `ask` and `summarize` call the model.
+- For an OpenRouter key (`sk-or-...`) set `MODEL=openrouter/<model id>`, e.g. `openrouter/openai/gpt-4.1`.
 - `summarize` makes one model call per folder; start with a small `--depth`.
