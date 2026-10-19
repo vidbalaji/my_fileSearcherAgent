@@ -18,6 +18,14 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).with_name(".env"))
+    load_dotenv()
+except ImportError:
+    pass
+
 MODEL = os.getenv("MODEL", "openai/gpt-4.1")
 MAX_TOOL_ROUNDS = 15
 MAX_SEARCH_HITS = 60
@@ -103,6 +111,32 @@ TOOLS = [
         },
     },
 ]
+
+
+def llm_kwargs() -> dict:
+    """Pass LITE_LLM_API_KEY / LITE_LLM_API_BASE to LiteLLM when set; otherwise it uses provider env vars."""
+    kwargs = {}
+    api_key = os.getenv("LITE_LLM_API_KEY") or os.getenv("LITELLM_API_KEY")
+    api_base = os.getenv("LITE_LLM_API_BASE") or os.getenv("LITELLM_API_BASE")
+    if api_key:
+        kwargs["api_key"] = api_key
+    if api_base:
+        kwargs["api_base"] = api_base
+    return kwargs
+
+
+def call_model(**kwargs):
+    import litellm
+
+    try:
+        return litellm.completion(model=MODEL, **llm_kwargs(), **kwargs)
+    except litellm.AuthenticationError as e:
+        sys.exit(
+            f"The API key was rejected for model '{MODEL}'.\n"
+            "Set a real key in LITE_LLM_API_KEY (or the provider's own variable, e.g. OPENAI_API_KEY),\n"
+            "either in this terminal or in a .env file next to folder_assistant.py.\n"
+            f"Details: {str(e).splitlines()[0][:200]}"
+        )
 
 
 class FolderTools:
@@ -194,11 +228,9 @@ class FolderTools:
 
 
 def ask(question: str, messages: list, tools: FolderTools, verbose: bool) -> str:
-    import litellm
-
     messages.append({"role": "user", "content": question})
     for _ in range(MAX_TOOL_ROUNDS):
-        response = litellm.completion(model=MODEL, messages=messages, tools=TOOLS)
+        response = call_model(messages=messages, tools=TOOLS)
         message = response.choices[0].message
         messages.append(message.model_dump(exclude_none=True))
 
@@ -343,8 +375,6 @@ def summary_material(folder: Path, tools: FolderTools) -> str:
 
 
 def summarize_folders(root: Path, max_depth: int) -> None:
-    import litellm
-
     tools = FolderTools(root)
     folders = folders_to_summarize(tools.root, max_depth)
     print(f"Writing {SUMMARY_FILE} in {len(folders)} folders (deepest first)...")
@@ -355,7 +385,7 @@ def summarize_folders(root: Path, max_depth: int) -> None:
             last_changed=datetime.fromtimestamp(newest).strftime("%Y-%m-%d"),
             material=summary_material(folder, tools),
         )
-        response = litellm.completion(model=MODEL, messages=[{"role": "user", "content": prompt}])
+        response = call_model(messages=[{"role": "user", "content": prompt}])
         (folder / SUMMARY_FILE).write_text(response.choices[0].message.content or "", encoding="utf-8")
         print(f"  wrote {(folder / SUMMARY_FILE).relative_to(tools.root.parent)}")
 

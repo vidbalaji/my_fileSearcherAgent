@@ -12,9 +12,18 @@ A small, read-only assistant for a folder of files. It has three commands:
 
 ```bash
 pip install -r requirements.txt
-export LITE_LLM_API_KEY=...      # or the provider's own key, e.g. OPENAI_API_KEY
-export MODEL=openai/gpt-4.1      # optional, any LiteLLM model name
+pip install python-dotenv        # optional: lets the script read a .env file
 ```
+
+Give it your API key, either in a `.env` file next to `folder_assistant.py` (copy `.env.example`):
+
+```
+LITE_LLM_API_KEY=sk-...
+```
+
+or in the terminal (PowerShell: `$env:LITE_LLM_API_KEY="sk-..."`, bash: `export LITE_LLM_API_KEY=sk-...`).
+Set `LITE_LLM_API_BASE` too if the key is for a LiteLLM proxy, and `MODEL` to use a model other than `openai/gpt-4.1`.
+The provider's own variable (e.g. `OPENAI_API_KEY`) also works when `LITE_LLM_API_KEY` is not set.
 
 ## Usage
 
